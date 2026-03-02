@@ -1,6 +1,6 @@
 # **osu\!mania 回放数据分析工具 (Replay Data Analyzer)**
 
-本项目是一个用于解析并分析 osu\!mania 游戏回放文件（.osr）的 Python 脚本。该工具能够提取回放中的按键实时数据，计算每个按键的持续时间（Duration），并生成高分辨率的统计分布折线图，旨在帮助 VSRG（Vertical Scrolling Rhythm Game）玩家分析其按键习惯与准度表现。
+本项目是一个用于解析并分析 osu\!mania 游戏回放文件（.osr）的 Python 脚本。该工具能够提取回放中的按键实时数据，计算每个按键的持续时间（Duration），并生成高分辨率的统计分布折线图，旨在帮助 VSRG（Vertical Scrolling Rhythm Game）玩家分析其按键习惯与准度表现。~~100%由gemini氛围编程~~
 
 ## **功能简介**
 
@@ -42,5 +42,6 @@ pip install matplotlib
 4. **代码规范**：采用了更严谨的模块化结构，并提供了详尽的中文专业注释，方便开发者进行二次开发。
 
 ## **许可证**
+
 
 本项目遵循 MIT 开源协议。
