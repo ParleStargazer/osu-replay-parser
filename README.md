@@ -1,6 +1,7 @@
 # **osu\!mania Replay Data Analyzer**
 
 This project is a Python script designed to parse and analyze osu\!mania replay files (.osr). It extracts real-time keypress data, calculates the duration of each note, and generates high-resolution statistical distribution charts to help VSRG (Vertical Scrolling Rhythm Game) players analyze their keypress habits and accuracy performance.
+~~100% gemini vibe coding ™~~
 
 ## **Features**
 
