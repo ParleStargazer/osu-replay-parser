@@ -42,45 +42,44 @@ def read_string(f):
 
 def perform_fft_analysis(durations):
     """
-    执行原始 FFT 分析：
-    1. 不进行插值和平滑，维持原始 1ms 采样特征。
-    2. 去除直流分量以解决低频误报。
+    执行对齐 1024 点的 FFT 分析：
+    1. 信号采样长度与 FFT 计算点数均设为 1024。
+    2. 搜索范围严格锁定在 10Hz - 500Hz。
+    3. 通过去均值处理直流干扰，保留原始频域曲线。
     """
     if not durations: return None, None, 0, "无有效数据"
     
-    fs = 1000  # 原始采样率 1ms = 1000Hz
-    max_ms = 512
+    fs = 1000  # 1ms 精度 = 1000Hz 采样率
+    n_points = 1024 # 对齐 1024 点，获得约 0.98Hz 的物理频率分辨率
     
-    # 1. 构建原始信号 (1ms 步长)
-    signal = np.zeros(max_ms)
-    counts = Counter([int(d) for d in durations if 0 < d < max_ms])
+    # 1. 构建信号 (统计 0-1024ms 内的分布)
+    signal = np.zeros(n_points)
+    counts = Counter([int(d) for d in durations if 0 < d < n_points])
     for ms, count in counts.items():
         signal[ms] = count
     
-    # 2. 核心优化：去直流分量 (减去均值)
-    # 这一步能消除 0Hz 附近的巨大能量堆积，防止误抓极低频峰值
+    # 2. 去均值处理 (减去直流分量以压低 0Hz 能量)
     signal = signal - np.mean(signal)
 
-    # 3. 执行 FFT
-    N = len(signal)
+    # 3. 执行 FFT (点数对齐)
     yf = fft(signal)
-    xf = fftfreq(N, 1/fs)[:N//2]
-    amplitude = 2.0/N * np.abs(yf[0:N//2])
+    xf = fftfreq(n_points, 1/fs)[:n_points//2]
+    amplitude = 2.0/n_points * np.abs(yf[0:n_points//2])
 
-    # 4. 自动评级判断 (搜索范围设定为 10Hz - 1000Hz)
-    mask = (xf >= 10) & (xf <= 1000)
+    # 4. 自动评级 (搜索 10Hz - 500Hz 范围内的特征)
+    mask = (xf >= 10) & (xf <= 500)
     if not any(mask): return xf, amplitude, 0, "分析失败"
     
     search_amp = amplitude[mask]
     peak_idx = np.argmax(search_amp)
     est_hz = xf[mask][peak_idx]
     
-    # 计算信噪比显著性
-    avg_amp = np.mean(amplitude[(xf >= 10)])
+    # 计算信噪比 (用于判断设备档位)
+    avg_amp = np.mean(amplitude[mask])
     snr = amplitude[mask][peak_idx] / avg_amp if avg_amp > 0 else 0
     
     # 判定结论
-    if snr < 3.5: 
+    if snr < 3.2: 
         conclusion = ">=500Hz (表现接近记录上限)"
     else:
         conclusion = f"主峰: {est_hz:.1f}Hz"
@@ -88,13 +87,14 @@ def perform_fft_analysis(durations):
     return xf, amplitude, est_hz, conclusion
 
 def parse_osr_and_plot_lines(file_path: str, width: int, height: int, output_dir: str):
-    """解析 osu! 回放文件并渲染图表"""
+    """解析 osu! 回放文件并渲染 1024 点对齐图表"""
     if not os.path.exists(file_path):
         print("错误：文件不存在。")
         return
 
     player_name = "Unknown"
     with open(file_path, 'rb') as f:
+        # 头部解析逻辑
         f.read(1) 
         struct.unpack('<i', f.read(4))[0] 
         read_string(f) 
@@ -133,7 +133,7 @@ def parse_osr_and_plot_lines(file_path: str, width: int, height: int, output_dir
                 durations_by_key[col].append(current_time - pressed_keys[col])
                 del pressed_keys[col]
 
-    # 执行核心 FFT 分析
+    # 执行 FFT 分析
     all_durs = [d for sublist in durations_by_key.values() for d in sublist]
     xf, amp, est_hz, conclusion = perform_fft_analysis(all_durs)
 
@@ -141,7 +141,7 @@ def parse_osr_and_plot_lines(file_path: str, width: int, height: int, output_dir
     dpi = 100
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(width / dpi, height / dpi), dpi=dpi)
     
-    # 左图：保留原有时域折线图渲染
+    # 左图：保留原有时域折线图渲染 (显示至 160ms)
     active_keys = [col for col, durs in durations_by_key.items() if len(durs) > 0]
     x_vals_t = np.arange(161)
     for key in sorted(active_keys):
@@ -158,21 +158,23 @@ def parse_osr_and_plot_lines(file_path: str, width: int, height: int, output_dir
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper right', fontsize='x-small')
 
-    # 右图：频域 FFT 分析图 (0-1000Hz)
+    # 右图：频域 FFT 分析图 (0-500Hz)
     if xf is not None:
-        ax2.plot(xf, amp, color='darkgreen')
+        ax2.plot(xf, amp, color='darkgreen', linewidth=1)
         ax2.fill_between(xf, amp, alpha=0.15, color='green')
         ax2.set_title(f"频域特征 (自动判断: {conclusion})", fontweight='bold')
-        ax2.set_xlabel("频率 Frequency (Hz)\n[注: 基于原始 1ms 采样数据分析]", fontsize=10, color='gray')
+        ax2.set_xlabel("频率 Frequency (Hz)\n[对齐 1024 点 FFT 分析]", fontsize=10, color='gray')
         ax2.set_ylabel("强度 Magnitude")
-        ax2.set_xlim(0, 1000) 
+        
+        # 物理精度边界锁定为 0-500Hz
+        ax2.set_xlim(0, 500) 
         ax2.xaxis.set_major_locator(MultipleLocator(125))
         ax2.grid(True, alpha=0.3)
         
-        # 标注真实特征峰
-        if est_hz > 0:
+        # 仅在估计值小于 500Hz 且有显著特征时进行标注
+        if 0 < est_hz < 500:
             max_v = amp[np.argmin(np.abs(xf - est_hz))]
-            ax2.annotate(f'Peak: {est_hz:.1f}Hz', xy=(est_hz, max_v), xytext=(est_hz+60, max_v),
+            ax2.annotate(f'Peak: {est_hz:.1f}Hz', xy=(est_hz, max_v), xytext=(est_hz+30, max_v),
                          arrowprops=dict(arrowstyle='->', color='black'))
 
     plt.tight_layout()
@@ -184,7 +186,7 @@ def parse_osr_and_plot_lines(file_path: str, width: int, height: int, output_dir
     print(f"\n[解析成功]")
     print(f"评估结果: {conclusion}")
     print(f"检测主峰频率: {est_hz:.2f} Hz")
-    print(f"提示: osu! Replay 物理记录精度上限为 1000Hz")
+    print(f"提示: osu! Replay 物理记录精度上限为 1000Hz (Nyquist 为 500Hz)")
     print(f"图表已保存至: {output_path}")
 
 def main():
