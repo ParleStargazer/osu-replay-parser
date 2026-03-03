@@ -7,7 +7,6 @@ import numpy as np
 from collections import Counter
 from matplotlib.ticker import MultipleLocator
 from scipy.fft import fft, fftfreq
-from scipy.signal import butter, filtfilt
 
 # 配置 Matplotlib 字体以支持中文显示
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
@@ -41,52 +40,52 @@ def read_string(f):
     length = read_uleb128(f)
     return f.read(length).decode('utf-8')
 
-def lowpass_filter(data, cutoff, fs, order=4):
-    """应用低通滤波，fs 为插值后的采样频率"""
-    nyq = 0.5 * fs
-    if cutoff >= nyq: return data
-    normal_cutoff = cutoff / nyq
-    b, a = butter(order, normal_cutoff, btype='low', analog=False)
-    return filtfilt(b, a, data)
-
-def perform_fft_analysis(durations, cutoff_hz=1200):
+def perform_fft_analysis(durations):
     """
-    执行频域转换，将采样率提升至 4000Hz 以获得更高的频谱平滑度
+    执行原始 FFT 分析：
+    1. 不进行插值和平滑，维持原始 1ms 采样特征。
+    2. 去除直流分量以解决低频误报。
     """
-    if not durations: return None, None, 0
+    if not durations: return None, None, 0, "无有效数据"
     
-    fs = 4000 
+    fs = 1000  # 原始采样率 1ms = 1000Hz
     max_ms = 512
     
     # 1. 构建原始信号 (1ms 步长)
-    original_x = np.arange(max_ms)
-    original_signal = np.zeros(max_ms)
+    signal = np.zeros(max_ms)
     counts = Counter([int(d) for d in durations if 0 < d < max_ms])
     for ms, count in counts.items():
-        original_signal[ms] = count
+        signal[ms] = count
     
-    # 2. 插值提升采样率 (Upsampling)
-    new_x = np.linspace(0, max_ms - 1, int(max_ms * (fs / 1000)))
-    signal = np.interp(new_x, original_x, original_signal)
-    
-    # 3. 预处理：去直流分量与滤波
+    # 2. 核心优化：去直流分量 (减去均值)
+    # 这一步能消除 0Hz 附近的巨大能量堆积，防止误抓极低频峰值
     signal = signal - np.mean(signal)
-    # 滤波上限设为 1200，允许观察到 1000Hz 附近的完整特征
-    signal = lowpass_filter(signal, cutoff_hz, fs)
 
-    # 4. 执行 FFT
+    # 3. 执行 FFT
     N = len(signal)
     yf = fft(signal)
     xf = fftfreq(N, 1/fs)[:N//2]
     amplitude = 2.0/N * np.abs(yf[0:N//2])
 
-    # 5. 搜索峰值 (5Hz 到 1200Hz 之间)
-    mask = (xf >= 5) & (xf <= 1200)
-    if not any(mask): return xf, amplitude, 0
+    # 4. 自动评级判断 (搜索范围设定为 10Hz - 1000Hz)
+    mask = (xf >= 10) & (xf <= 1000)
+    if not any(mask): return xf, amplitude, 0, "分析失败"
     
-    peak_idx = np.argmax(amplitude[mask])
+    search_amp = amplitude[mask]
+    peak_idx = np.argmax(search_amp)
     est_hz = xf[mask][peak_idx]
-    return xf, amplitude, est_hz
+    
+    # 计算信噪比显著性
+    avg_amp = np.mean(amplitude[(xf >= 10)])
+    snr = amplitude[mask][peak_idx] / avg_amp if avg_amp > 0 else 0
+    
+    # 判定结论
+    if snr < 3.5: 
+        conclusion = ">=500Hz (表现接近记录上限)"
+    else:
+        conclusion = f"主峰: {est_hz:.1f}Hz"
+
+    return xf, amplitude, est_hz, conclusion
 
 def parse_osr_and_plot_lines(file_path: str, width: int, height: int, output_dir: str):
     """解析 osu! 回放文件并渲染图表"""
@@ -134,15 +133,15 @@ def parse_osr_and_plot_lines(file_path: str, width: int, height: int, output_dir
                 durations_by_key[col].append(current_time - pressed_keys[col])
                 del pressed_keys[col]
 
-    # 执行 FFT 分析
+    # 执行核心 FFT 分析
     all_durs = [d for sublist in durations_by_key.values() for d in sublist]
-    xf, amp, est_hz = perform_fft_analysis(all_durs, 1200)
+    xf, amp, est_hz, conclusion = perform_fft_analysis(all_durs)
 
     # --- 渲染逻辑 ---
     dpi = 100
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(width / dpi, height / dpi), dpi=dpi)
     
-    # 左图：时域折线图
+    # 左图：保留原有时域折线图渲染
     active_keys = [col for col, durs in durations_by_key.items() if len(durs) > 0]
     x_vals_t = np.arange(161)
     for key in sorted(active_keys):
@@ -159,29 +158,31 @@ def parse_osr_and_plot_lines(file_path: str, width: int, height: int, output_dir
     ax1.grid(True, alpha=0.3)
     ax1.legend(loc='upper right', fontsize='x-small')
 
-    # 右图：频域 FFT 分析图
+    # 右图：频域 FFT 分析图 (0-1000Hz)
     if xf is not None:
         ax2.plot(xf, amp, color='darkgreen')
         ax2.fill_between(xf, amp, alpha=0.15, color='green')
-        ax2.set_title(f"频域特征 (峰值: {est_hz:.1f}Hz)", fontweight='bold')
-        ax2.set_xlabel("频率 Frequency (Hz)\n[注: osu! Replay 最高支持 1000Hz 精度]", fontsize=10, color='gray')
+        ax2.set_title(f"频域特征 (自动判断: {conclusion})", fontweight='bold')
+        ax2.set_xlabel("频率 Frequency (Hz)\n[注: 基于原始 1ms 采样数据分析]", fontsize=10, color='gray')
         ax2.set_ylabel("强度 Magnitude")
-        ax2.set_xlim(0, 1200) 
-        ax2.xaxis.set_major_locator(MultipleLocator(200))
+        ax2.set_xlim(0, 1000) 
+        ax2.xaxis.set_major_locator(MultipleLocator(125))
         ax2.grid(True, alpha=0.3)
         
-        # 标注峰值
-        max_v = np.max(amp[(xf >= 5) & (xf <= 1200)])
-        ax2.annotate(f'Peak: {est_hz:.1f}Hz', xy=(est_hz, max_v), xytext=(est_hz+60, max_v),
-                     arrowprops=dict(arrowstyle='->', color='black'))
+        # 标注真实特征峰
+        if est_hz > 0:
+            max_v = amp[np.argmin(np.abs(xf - est_hz))]
+            ax2.annotate(f'Peak: {est_hz:.1f}Hz', xy=(est_hz, max_v), xytext=(est_hz+60, max_v),
+                         arrowprops=dict(arrowstyle='->', color='black'))
 
     plt.tight_layout()
     file_basename = os.path.basename(file_path)
-    output_path = os.path.join(output_dir, f"{os.path.splitext(file_basename)[0]}_analysis_1200hz.png")
+    output_path = os.path.join(output_dir, f"{os.path.splitext(file_basename)[0]}_hz_analysis.png")
     plt.savefig(output_path)
     plt.close()
 
     print(f"\n[解析成功]")
+    print(f"评估结果: {conclusion}")
     print(f"检测主峰频率: {est_hz:.2f} Hz")
     print(f"提示: osu! Replay 物理记录精度上限为 1000Hz")
     print(f"图表已保存至: {output_path}")
